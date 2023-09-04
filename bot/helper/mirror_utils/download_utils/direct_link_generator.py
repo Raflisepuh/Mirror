@@ -15,9 +15,10 @@ from math import floor, pow
 from os import path
 from re import findall, match, search, sub
 from time import sleep
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from uuid import uuid4
 from bs4 import BeautifulSoup
+from requests import Session, session as req_session
 from cloudscraper import create_scraper
 from lk21 import Bypass
 from lxml import etree
@@ -441,23 +442,91 @@ def uploadee(url: str) -> str:
 def terabox(url) -> str:
     if not path.isfile('terabox.txt'):
         raise DirectDownloadLinkException("ERROR: terabox.txt not found")
-    session = create_scraper()
     try:
-        res = session.request('GET', url)
-        key = res.url.split('?surl=')[-1]
         jar = MozillaCookieJar('terabox.txt')
         jar.load()
-        session.cookies.update(jar)
-        res = session.request('GET', f'https://www.terabox.com/share/list?app_id=250528&shorturl={key}&root=1')
-        result = res.json()['list']
     except Exception as e:
         raise DirectDownloadLinkException(f"ERROR: {e.__class__.__name__}")
-    if len(result) > 1:
-        raise DirectDownloadLinkException("ERROR: Can't download mutiple files")
-    result = result[0]
-    if result['isdir'] != '0':
-        raise DirectDownloadLinkException("ERROR: Can't download folder")
-    return result['dlink']
+    cookies = {}
+    for cookie in jar:
+        cookies[cookie.name] = cookie.value
+    session = Session()
+    try:
+        _res = session.get(url, cookies=cookies)
+    except Exception as e:
+        session.close()
+        raise DirectDownloadLinkException(f'ERROR: {e.__class__.__name__}')
+
+    if jsToken := findall(r'window\.jsToken.*%22(.*)%22', _res.text):
+        jsToken = jsToken[0]
+    else:
+        session.close()
+        raise DirectDownloadLinkException('ERROR: jsToken not found!.')
+    shortUrl = parse_qs(urlparse(_res.url).query).get('surl')
+    if not shortUrl:
+        raise DirectDownloadLinkException("ERROR: Could not find surl")
+
+    details = {'contents':[], 'title': '', 'total_size': 0}
+    details["header"] = ' '.join(f'{key}: {value}' for key, value in cookies.items())
+
+    def __fetch_links(dir_='', folderPath=''):
+        params = {
+            'app_id': '250528',
+            'jsToken': jsToken,
+            'shorturl': shortUrl
+            }
+        if dir_:
+            params['dir'] = dir_
+        else:
+            params['root'] = '1'
+        try:
+            _json = session.get("https://www.1024tera.com/share/list", params=params, cookies=cookies).json()
+        except Exception as e:
+            raise DirectDownloadLinkException(f'ERROR: {e.__class__.__name__}')
+        if _json['errno'] not in [0, '0']:
+            if 'errmsg' in _json:
+                raise DirectDownloadLinkException(f"ERROR: {_json['errmsg']}")
+            else:
+                raise DirectDownloadLinkException('ERROR: Something went wrong!')
+
+        if "list" not in _json:
+            return
+        contents = _json["list"]
+        for content in contents:
+            if content['isdir'] in ['1', 1]:
+                if not folderPath:
+                    if not details['title']:
+                        details['title'] = content['server_filename']
+                        newFolderPath = path.join(details['title'])
+                    else:
+                        newFolderPath = path.join(details['title'], content['server_filename'])
+                else:
+                    newFolderPath = path.join(folderPath, content['server_filename'])
+                __fetch_links(content['path'], newFolderPath)
+            else:
+                if not folderPath:
+                    if not details['title']:
+                        details['title'] = content['server_filename']
+                    folderPath = details['title']
+                item = {
+                    'url': content['dlink'],
+                    'filename': content['server_filename'],
+                    'path' : path.join(folderPath),
+                }
+                if 'size' in content:
+                    size = content["size"]
+                    if isinstance(size, str) and size.isdigit():
+                        size = float(size)
+                    details['total_size'] += size
+                details['contents'].append(item)
+
+    try:
+        __fetch_links()
+    except Exception as e:
+        session.close()
+        raise DirectDownloadLinkException(e)
+    session.close()
+    return details
 
 def filepress(url):
     cget = create_scraper().request
