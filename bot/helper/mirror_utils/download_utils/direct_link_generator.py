@@ -526,7 +526,7 @@ def terabox(url) -> str:
         session.close()
         raise DirectDownloadLinkException(e)
     session.close()
-    return details
+    return details["contents"][0]["url"]
 
 def filepress(url):
     cget = create_scraper().request
